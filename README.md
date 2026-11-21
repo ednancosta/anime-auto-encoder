@@ -1,42 +1,66 @@
-# 🎬 Anime Auto-Encoder Pipeline (AV1)
+# 🎬 Anime & Movie Auto-Encoder Pipeline (AV1)
 
-Este é um pipeline automatizado construído em **PowerShell** para otimização e compressão de animes. O script orquestra a conversão de vídeos para o formato AV1 de altíssima eficiência, aplicando transcodificação de áudio inteligente e auditoria de qualidade rigorosa (SSIMULACRA2) a cada episódio.
-
-## 🚀 Principais Funcionalidades
-* **Auto-Boost Integrado:** Variação dinâmica de CRF baseada na complexidade de cada cena, garantindo bits extras onde importa e economia em cenas estáticas.
-* **Áudio Adaptativo:** Transcodifica canais Mono (64k), Estéreo (96k) e Surround (256k) usando o codec Opus de forma inteligente via FFmpeg.
-* **Auditoria de Qualidade:** Compara o arquivo codificado com o original e calcula a pontuação matemática de distorção usando métricas de percepção visual.
-* **Controle de Eficiência (Regra dos 80%):** Apenas substitui o vídeo original se o encode gerar pelo menos 20% de economia de espaço em disco.
-* **Zero Gargalo (Idle Priority):** Execução em background (`Idle`), permitindo o uso normal do PC (ou até jogos leves) durante as horas de codificação.
+Pipeline automatizado em **PowerShell** para otimização e compressão de **Animes/Séries** e **Filmes (Live-Action)** em **AV1**, combinando descoberta automática de CRF por alvo visual (`--target-ssimu2`), cálculo de *zones* por cena via **Auto-Boost-Essential**, transcodificação inteligente de áudio para **Opus**, padronização de legendas PT-BR (Placas/Forçadas) e auditoria final acelerada por GPU (**SSIMULACRA2** via `FFVship`).
 
 ---
 
-## ⚙️ A Mágica por trás do Auto-Boost
-Integrado ao script, o processamento de vídeo funciona em duas etapas principais para garantir uma consistência visual excepcional sem quebrar o pipeline:
-1.  **Fast-Pass:** Executa um passe rápido no encoder, encontra mudanças de cena baseadas em keyframes e calcula as métricas de qualidade prévias (SSIMULACRA2).
-2.  **Final-Pass:** Ajusta automaticamente o CRF das zonas específicas, combinando a alocação dinâmica com a injeção segura de grão (`--film-grain 4`), evitando *Broken Pipes* e falhas de memória.
+## ✨ Principais Funcionalidades (v2.0.0)
+
+* **Alvo de Qualidade Automático (`--target-ssimu2 81.5`):** Funciona no espírito do `ab-av1`, mas avaliando **100% do vídeo** no `fast_pass` sem sorteio de trechos e **sem passes extras** — ajusta o CRF base automaticamente (protegendo média e 15º percentil) antes de distribuir as *zones* cena a cena.
+* **Modos Dedicados (`-MediaType 1` e `-MediaType 2`):**
+  * `-MediaType 1` (**Anime — Padrão**): `--quality high` com alvo `SSIMULACRA2 81.5`, `--film-grain 4`, extração automática de placas `.ass` (`Signs`) e áudio `por -> jpn -> eng` (Estéreo 96k).
+  * `-MediaType 2` (**Filmes / Live-Action**): base `CRF 24` (1080p) / `CRF 28` (4K) com alvo `SSIMULACRA2 81.5`, `--film-grain 8`, `--luminance-qp-bias 15`, detecção automática de **HDR10** (CICP, Mastering Display, MaxCLL/MaxFALL + `--variance-boost-curve 3`), áudio `por -> eng` (Estéreo 128k / 5.1 256k / 7.1 384k) e amostragem `--every 3` no `FFVship`.
+* **Regra Enxuta de Legendas PT-BR:**
+  * Se houver áudio em **Português**, a faixa de **Placas/Forçada (`Signs`/`Forced`)** vira `Default=yes` + `Forced=yes` (extraindo placas automaticamente do `.ass` completo em animes se necessário).
+  * Se o áudio for estrangeiro (ex.: Japonês/Inglês), a **legenda completa em Português** vira `Default=yes`.
+  * Todos os outros idiomas de legenda são mantidos intactos no `.mkv` apenas como backup.
+* **Isolamento Unicode & Caminhos Longos:** Cria *hardlink* instantâneo em pasta ASCII temporária (`_autoboost_work`) quando o arquivo tem caracteres como `：`, colchetes ou caminho longo (> 190 chars).
+* **Controle de Eficiência & Segurança:**
+  * **Regra dos 80% (com Disjuntor Rápido no `.ivf`):** Aborta e registra no cache `.autoboost_skip.json` se o arquivo não economizar pelo menos 20% de espaço.
+  * **Substituição Atômica (`Move-FileSafely`):** Nunca apaga o original antes de garantir o novo arquivo no destino (restaura `.autoboost.bak` em caso de falha).
+  * **Log de Calibração (`autoboost_metrics.csv`):** Salva tamanho antes/depois, SSIMULACRA2 do `fast_pass`, distribuição final (`Avg`, `Median`, `5th`, `95th`, `Min`, `StdDev`), CRF efetivo e tempo gasto.
 
 ---
 
-## 🛠️ Pré-requisitos e Dependências
-Para que o pipeline funcione, você precisará das seguintes ferramentas instaladas e acessíveis no seu sistema:
+## 🛠️ Pré-requisitos e Forks Utilizados
 
-1.  **Python 3.12+** (Para rodar o núcleo do Auto-Boost)
-2.  **SVT-AV1-Essential:** [Build personalizada](https://github.com/nekotrix/SVT-AV1-Essential/discussions/12)
-3.  **FFmpeg:** [Última versão (GPL)](https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip) *(Deve estar no PATH do Windows)*
-4.  **Auto-Boost-Essential:** [Script Python Base](https://github.com/nekotrix/auto-boost-algorithm/blob/main/Auto-Boost-Essential/Auto-Boost-Essential.py)
-5.  **VapourSynth & FFVship (CUDA/CPU):** [FFVship_nvidia v5.0.0](https://codeberg.org/Line-fr/Vship/releases) (Para a auditoria de qualidade das zonas)
-6.  **MKVToolNix:** *(O executável `mkvmerge` deve estar no PATH do Windows)*
-
----
-
-## 📂 Configuração dos Caminhos (Paths)
-O arquivo `Converter Animes autoboost.ps1` foi construído para ser altamente customizável. Abra o script e verifique o dicionário `$AppConfig`:
-
-* O script localizará o Python automaticamente na pasta especificada: `$HOME\PythonEnv\AutoBoost\Scripts\python.exe`
-* O executável do SVT-AV1 será localizado em: `$HOME\SVT-AV1-Essential\Bin\Release\SvtAv1EncApp.exe`
-* **Importante:** Ajuste as variáveis de caminho dentro do bloco `$AppConfig` para refletirem a estrutura exata de pastas do seu computador antes de iniciar o primeiro encode.
+1. **Auto-Boost-Essential (Fork com `--target-ssimu2`):** [ednancosta/auto-boost-algorithm](https://github.com/ednancosta/auto-boost-algorithm)
+2. **SVT-AV1-Essential (Motor com suporte a `--zones`):** [ednancosta/SVT-AV1-Essential](https://github.com/ednancosta/SVT-AV1-Essential)
+3. **Python 3.12+** (com `vsjetpack`, `rich`, `vapoursynth` e `ffms2`)
+4. **FFVship (GPU CUDA / CPU):** [Vship](https://codeberg.org/Line-fr/Vship/releases)
+5. **FFmpeg & FFprobe** (no `PATH` do Windows)
+6. **MKVToolNix (`mkvmerge.exe`)**
 
 ---
 
-> **Nota:** Este pipeline foi desenhado para ser resiliente. Se a conversão de um episódio falhar no meio do caminho (ou não atingir os critérios de qualidade), o script preservará o arquivo original e passará para o próximo da fila de forma automática.
+## 🚀 Como Usar
+
+Abra o PowerShell na pasta desejada e execute:
+
+```powershell
+# Anime / Séries de Animação (Padrão: -MediaType 1)
+& "C:\Caminho\Do\Autoboost script.ps1" -MediaType 1 -TargetDir "D:\Animes"
+
+# Filmes / Séries Live-Action (HDR10 e Surround automáticos)
+& "C:\Caminho\Do\Autoboost script.ps1" -MediaType 2 -TargetDir "D:\Filmes"
+
+# Opcional: corrigir apenas faixas de áudio/legendas/fontes em vídeos já em AV1/HEVC/VP9
+& "C:\Caminho\Do\Autoboost script.ps1" -FixTracksOnOptimizedVideos -TargetDir "D:\Animes"
+```
+
+Antes de rodar pela primeira vez, ajuste o bloco `$AppConfig.Paths` no topo do [`Autoboost script.ps1`](./Autoboost%20script.ps1) para apontar para os executáveis da sua máquina (`FFVship.exe`, `python.exe`, `Auto-Boost-Essential.py`, `SvtAv1EncApp.exe` e `mkvmerge.exe`).
+
+---
+
+## 📋 Changelog
+
+### v2.0.0
+* Renomeado `Converter Animes autoboost.ps1` para `Autoboost script.ps1`.
+* Adicionado suporte nativo a **Filmes / Live-Action (`-MediaType 2`)**, incluindo extração automática de metadados HDR10 (MDCV, MaxCLL/FALL), curva PQ e áudio Opus 5.1/7.1.
+* Integrado `--target-ssimu2 81.5` ao fork `Auto-Boost-Essential` para descoberta dinâmica de CRF sem passes extras.
+* Simplificadas as regras de idiomas e legendas: foco em Português (Placas/Forçada com áudio PT-BR; completa com áudio estrangeiro), preservando demais legendas como backup.
+* Adicionado log consolidado `autoboost_metrics.csv` com notas do `fast_pass`, métricas finais de SSIMULACRA2 e CRF efetivo.
+* Adicionados staging Unicode via Hardlink Win32, cache O(1) de fontes, correção de legendas PGS/VobSub (`.mks`) e preservação de DAR anamórfico.
+
+### v1.0.0
+* Release inicial com pipeline AV1 para animes usando Auto-Boost-Essential e regra dos 80%.
