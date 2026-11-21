@@ -1,5 +1,4 @@
-﻿&{
-<#
+﻿<#
 .SYNOPSIS
     Pipeline automatizado e inteligente para processamento e otimização de mídias (Anime/Séries).
 .DESCRIPTION
@@ -177,8 +176,10 @@ if ($MediaType -eq 1) {
     $AppConfig.Paths.Add("SvtAv1Exe", "C:\Path\SvtAv1EncAppNeko\SvtAv1EncApp.exe")
 
     $AppConfig.Add("Encoder", @{
+        AnimeCrf1080p = 25
+        AnimeCrf4K    = 28
         TargetSsimu2  = 81.5
-        AutoBoostArgs = @("--quality", "high", "--target-ssimu2", "81.5", "--ssimu2", "gpu")
+        AutoBoostArgs = @("--target-ssimu2", "81.5", "--ssimu2", "gpu")
         FinalParams   = "--scm 0 --auto-tiling 1 --film-grain 4 --tune 0 --fast-decode 1 --qp-scale-compress-strength 3"
     })
     $AppConfig.Rules.Add("MinAverage", 80.0)
@@ -494,7 +495,7 @@ function Get-FileSkipSignature {
         [System.IO.FileInfo]$FileInfo,
         [string]$SvtVersion = ""
     )
-    $EncKey = "$MediaType|$SvtVersion|$($AppConfig.Encoder.AutoBoostArgs -join ' ')|$($AppConfig.Encoder.FinalParams)|$($AppConfig.Encoder.MovieCrf1080p)|$($AppConfig.Encoder.MovieCrf4K)|$($AppConfig.Encoder.TargetSsimu2)|$($AppConfig.Rules.MaxTargetSizeRatio)"
+    $EncKey = "$MediaType|$SvtVersion|$($AppConfig.Encoder.AutoBoostArgs -join ' ')|$($AppConfig.Encoder.FinalParams)|$($AppConfig.Encoder.AnimeCrf1080p)|$($AppConfig.Encoder.AnimeCrf4K)|$($AppConfig.Encoder.MovieCrf1080p)|$($AppConfig.Encoder.MovieCrf4K)|$($AppConfig.Encoder.TargetSsimu2)|$($AppConfig.Rules.MaxTargetSizeRatio)"
     return "$($FileInfo.Length)|$($FileInfo.LastWriteTimeUtc.Ticks)|$EncKey"
 }
 
@@ -806,22 +807,14 @@ function Get-RuntimeEncoderParams {
     )
 
     $ColorFlags = $ColorProfile.CliFlags.Trim()
+    $Is4K = (([int]$VideoStream.width * [int]$VideoStream.height) -gt (1920 * 1080))
     if ($MediaType -eq 1) {
-        $AbArgs = @($AppConfig.Encoder.AutoBoostArgs)
-        if (-not [string]::IsNullOrWhiteSpace($ColorFlags)) {
-            $AbArgs += @("--fast-params", $ColorFlags)
-        }
-        $FinParams = ($AppConfig.Encoder.FinalParams + " " + $ColorFlags).Trim()
-        $CombinedArgs = "$($AbArgs -join ' ') $FinParams"
-        $BaseTarget = if ($CombinedArgs -match "--crf\s+(\S+)") {
-            "crf=$($Matches[1])"
-        } elseif ($CombinedArgs -match "--quality\s+(\S+)") {
-            "quality=$($Matches[1])"
-        } else {
-            "default"
-        }
+        $BaseCrf = if ($Is4K) { $AppConfig.Encoder.AnimeCrf4K } else { $AppConfig.Encoder.AnimeCrf1080p }
+        $FastStr = ("--crf $BaseCrf $ColorFlags").Trim()
+        $AbArgs = @("--fast-params", $FastStr) + @($AppConfig.Encoder.AutoBoostArgs)
+        $FinParams = ("--crf $BaseCrf " + $AppConfig.Encoder.FinalParams + " " + $ColorFlags).Trim()
+        $BaseTarget = "crf=$BaseCrf"
     } else {
-        $Is4K = (([int]$VideoStream.width * [int]$VideoStream.height) -gt (1920 * 1080))
         $BaseCrf = if ($Is4K) { $AppConfig.Encoder.MovieCrf4K } else { $AppConfig.Encoder.MovieCrf1080p }
         $FastStr = ("--preset 6 --crf $BaseCrf $ColorFlags").Trim()
         $AbArgs = @("--fast-params", $FastStr) + @($AppConfig.Encoder.AutoBoostArgs)
@@ -2062,5 +2055,4 @@ foreach ($File in $TargetFiles) {
 Write-AppLog "Pipeline finalizado para todos os ativos na árvore de pastas." "SUCCESS"
 } finally {
     try { (Get-Process -Id $PID).PriorityClass = $OriginalProcessPriority } catch {}
-}
 }

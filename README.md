@@ -8,7 +8,7 @@ Pipeline automatizado em **PowerShell** para otimização e compressão de **Ani
 
 * **Alvo de Qualidade Automático (`--target-ssimu2 81.5`):** Funciona no espírito do `ab-av1`, mas avaliando **100% do vídeo** no `fast_pass` sem sorteio de trechos e **sem passes extras** — ajusta o CRF base automaticamente (protegendo média e 15º percentil) antes de distribuir as *zones* cena a cena.
 * **Modos Dedicados (`-MediaType 1` e `-MediaType 2`):**
-  * `-MediaType 1` (**Anime — Padrão**): `--quality high` com alvo `SSIMULACRA2 81.5`, `--film-grain 4`, extração automática de placas `.ass` (`Signs`) e áudio `por -> jpn -> eng` (Estéreo 96k).
+  * `-MediaType 1` (**Anime — Padrão**): base `CRF 25` (1080p) / `CRF 28` (4K) com alvo `SSIMULACRA2 81.5`, `--film-grain 4`, extração automática de placas `.ass` (`Signs`) e áudio `por -> jpn -> eng` (Estéreo 96k).
   * `-MediaType 2` (**Filmes / Live-Action**): base `CRF 24` (1080p) / `CRF 28` (4K) com alvo `SSIMULACRA2 81.5`, `--film-grain 8`, `--luminance-qp-bias 15`, detecção automática de **HDR10** (CICP, Mastering Display, MaxCLL/MaxFALL + `--variance-boost-curve 3`), áudio `por -> eng` (Estéreo 128k / 5.1 256k / 7.1 384k) e amostragem `--every 3` no `FFVship`.
 * **Regra Enxuta de Legendas PT-BR:**
   * Se houver áudio em **Português**, a faixa de **Placas/Forçada (`Signs`/`Forced`)** vira `Default=yes` + `Forced=yes` (extraindo placas automaticamente do `.ass` completo em animes se necessário).
@@ -53,6 +53,10 @@ Antes de rodar pela primeira vez, ajuste o bloco `$AppConfig.Paths` no topo do [
 ---
 
 ## 📋 Changelog
+
+### v2.0.1
+* Corrigido o binding de parâmetros no topo de [`Autoboost script.ps1`](./Autoboost%20script.ps1) (removido wrapper `&{...}`), fazendo `-TargetDir`, `-MediaType` e `-FixTracksOnOptimizedVideos` funcionarem via linha de comando.
+* Calibrado o CRF inicial de Anime (`-MediaType 1`) para **`CRF 25` (1080p)** / **`CRF 28` (4K)** em conjunto com a inclinação assimétrica do `--target-ssimu2 81.5` (`1.5` p/ baixar, `1.25` p/ subir, trava `[-6.0, +8.0]`).
 
 ### v2.0.0
 * Renomeado `Converter Animes autoboost.ps1` para `Autoboost script.ps1`.
