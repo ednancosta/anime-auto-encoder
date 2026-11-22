@@ -205,7 +205,7 @@ if ($MediaType -eq 1) {
     })
     $AppConfig.Rules.Add("MinAverage", 80.0)
     $AppConfig.Rules.Add("Min5th", 65.0) # Relaxado para lidar com Motion Blur real
-    $AppConfig.Rules.Add("FfvshipEvery", 3)
+    $AppConfig.Rules.Add("FfvshipEvery", 1) # SSIMU2 na GPU é rápido (~15 min/filme); todos os frames deixam o p5 confiável
     $AppConfig.Rules.ValidVideoCodecs = @("av1", "vp9") # Filmes: HEVC (4K HDR) também é re-encodado; a regra dos 80% protege
 }
 
@@ -537,13 +537,15 @@ function New-SafeExecutionContext {
         $DriveRoot   = [System.IO.Path]::GetPathRoot($RealFullPath)
         $SafeBaseDir = if ($DriveRoot -match "^[A-Za-z]:\\$") { $DriveRoot } else { $env:TEMP }
         $SafeRootDir = [System.IO.Path]::Combine($SafeBaseDir, "_autoboost_work")
-        $JobId       = [Guid]::NewGuid().ToString("N").Substring(0, 12)
+        # Id estável por arquivo (caminho+tamanho): permite retomar etapas concluídas após interrupção.
+        $JobId = [System.BitConverter]::ToString([System.Security.Cryptography.SHA1]::HashData([System.Text.Encoding]::UTF8.GetBytes("$RealFullPath|$($File.Length)"))).Replace("-", "").Substring(0, 12).ToLowerInvariant()
         $SafeJobDir  = [System.IO.Path]::Combine($SafeRootDir, "job_$JobId")
         [void][System.IO.Directory]::CreateDirectory($SafeJobDir)
 
         $SafeSourceFile = [System.IO.Path]::Combine($SafeJobDir, "source$Ext")
         $LongRealPath   = ConvertTo-LongPath $RealFullPath
 
+        if ([System.IO.File]::Exists($SafeSourceFile)) { [System.IO.File]::Delete($SafeSourceFile) }
         $Linked = [Win32HardLink]::CreateHardLinkW($SafeSourceFile, $LongRealPath, [IntPtr]::Zero)
         if (-not $Linked -or -not [System.IO.File]::Exists($SafeSourceFile)) {
             [System.IO.File]::Copy($LongRealPath, $SafeSourceFile, $true)
@@ -593,17 +595,20 @@ function Remove-TemporaryAssets {
     #>
     param (
         [hashtable]$Context,
-        [bool]$KeepMkvTemp = $false
+        [bool]$KeepMkvTemp = $false,
+        [bool]$KeepResumable = $false
     )
     try { if ([System.IO.File]::Exists($Context.VideoTemp))     { [System.IO.File]::Delete($Context.VideoTemp) } } catch {}
     try { if ([System.IO.File]::Exists($Context.AudioTemp))     { [System.IO.File]::Delete($Context.AudioTemp) } } catch {}
     try { if ([System.IO.File]::Exists($Context.TagsXml))       { [System.IO.File]::Delete($Context.TagsXml) } } catch {}
     try { if ([System.IO.Directory]::Exists($Context.SubsDir))  { [System.IO.Directory]::Delete($Context.SubsDir, $true) } } catch {}
-    try { if ([System.IO.Directory]::Exists($Context.WorkDir))  { [System.IO.Directory]::Delete($Context.WorkDir, $true) } } catch {}
+    if (-not $KeepResumable) {
+        try { if ([System.IO.Directory]::Exists($Context.WorkDir))  { [System.IO.Directory]::Delete($Context.WorkDir, $true) } } catch {}
+    }
 
     if (-not $KeepMkvTemp) {
         try { if ([System.IO.File]::Exists($Context.MkvTemp)) { [System.IO.File]::Delete($Context.MkvTemp) } } catch {}
-        if ($Context.UsingSafeStaging) {
+        if ($Context.UsingSafeStaging -and -not $KeepResumable) {
             try { if ([System.IO.File]::Exists($Context.OriginalFile))    { [System.IO.File]::Delete($Context.OriginalFile) } } catch {}
             try { if ([System.IO.Directory]::Exists($Context.SafeJobDir)) { [System.IO.Directory]::Delete($Context.SafeJobDir, $true) } } catch {}
             try {
@@ -1461,6 +1466,19 @@ function Invoke-VideoEncoding {
     Write-AppLog "Iniciando codificação de vídeo (Auto-Boost)..." "WARN"
     $PythonArgs = @("-i", $Context.OriginalFile) + @($RuntimeEncoder.AutoBoostArgs) + @("--final-params", $RuntimeEncoder.FinalParams)
 
+    # Retomada só entre etapas; descarta trabalho salvo se encoder/parâmetros mudaram.
+    $ResumeKey = "$SvtVersion|$($PythonArgs -join ' ')"
+    $ResumeKeyFile = [System.IO.Path]::Combine($Context.WorkDir, "resume_key.txt")
+    if ([System.IO.Directory]::Exists($Context.WorkDir) -and (-not [System.IO.File]::Exists($ResumeKeyFile) -or [System.IO.File]::ReadAllText($ResumeKeyFile) -ne $ResumeKey)) {
+        [System.IO.Directory]::Delete($Context.WorkDir, $true)
+    }
+    [void][System.IO.Directory]::CreateDirectory($Context.WorkDir)
+    [System.IO.File]::WriteAllText($ResumeKeyFile, $ResumeKey)
+    if (@([System.IO.Directory]::GetFiles($Context.WorkDir, "*_stage.txt")).Count -gt 0) {
+        Write-AppLog "Trabalho anterior encontrado: retomando a partir da última etapa concluída (passe interrompido recomeça do frame 0)." "WARN"
+    }
+    $PythonArgs += "--resume"
+
     Push-Location -LiteralPath $Context.WorkingDir
     try {
         & $AppConfig.Paths.PythonExe $AppConfig.Paths.AutoBoostScript @PythonArgs
@@ -1867,6 +1885,8 @@ if (-not $ActiveSvt) {
             $StaleJobs = @([System.IO.Directory]::EnumerateDirectories($Wr, "job_*"))
             if ($StaleJobs.Count -gt 0) {
                 foreach ($JobDir in $StaleJobs) {
+                    $IsResumable = @([System.IO.Directory]::GetFiles($JobDir, "*_stage.txt", [System.IO.SearchOption]::AllDirectories)).Count -gt 0
+                    if ($IsResumable -and [System.IO.Directory]::GetLastWriteTime($JobDir) -gt (Get-Date).AddDays(-14)) { continue } # shortcut: retomáveis expiram em 14 dias
                     try { [System.IO.Directory]::Delete($JobDir, $true) } catch {}
                 }
                 Write-AppLog "Limpeza preventiva: $($StaleJobs.Count) pasta(s) órfã(s) removida(s) de '$Wr'." "INFO"
@@ -1989,6 +2009,7 @@ foreach ($File in $TargetFiles) {
         # ETAPA B1: Codificação de Vídeo (.ivf)
         Write-AppLog "Encoder alvo: $SvtVersion" "INFO"
         Invoke-VideoEncoding -Context $Ctx -RuntimeEncoder $RuntimeEncoder
+        $Ctx.VideoDone = $true
 
         $FastSsimuAvg = $null; $FastSsimuP15 = $null; $FastSsimuMin = $null; $EffectiveCrf = $null
         $FastMetricsPath = ConvertTo-LongPath ([System.IO.Path]::Combine($Ctx.WorkDir, "fast_metrics.txt"))
@@ -2086,7 +2107,7 @@ foreach ($File in $TargetFiles) {
         Write-AppLog "Falha crítica no processamento de $($Ctx.BaseName): $_" "ERROR"
         # O bloco Catch garante que o erro num episódio não trave a temporada inteira
     } finally {
-        Remove-TemporaryAssets -Context $Ctx
+        Remove-TemporaryAssets -Context $Ctx -KeepResumable (-not $Ctx.VideoDone) # encode de vídeo interrompido: guarda etapas para retomar
     }
 }
 
