@@ -4,12 +4,12 @@ Pipeline automatizado em **PowerShell** para otimização e compressão de **Ani
 
 ---
 
-## ✨ Principais Funcionalidades (v2.0.0)
+## ✨ Principais Funcionalidades (v2.1.0)
 
 * **Alvo de Qualidade Automático (`--target-ssimu2 81.5`):** Funciona no espírito do `ab-av1`, mas avaliando **100% do vídeo** no `fast_pass` sem sorteio de trechos e **sem passes extras** — ajusta o CRF base automaticamente (protegendo média e 15º percentil) antes de distribuir as *zones* cena a cena.
 * **Modos Dedicados (`-MediaType 1` e `-MediaType 2`):**
-  * `-MediaType 1` (**Anime — Padrão**): base `CRF 25` (1080p) / `CRF 28` (4K) com alvo `SSIMULACRA2 81.5`, `--film-grain 4`, extração automática de placas `.ass` (`Signs`) e áudio `por -> jpn -> eng` (Estéreo 96k).
-  * `-MediaType 2` (**Filmes / Live-Action**): base `CRF 24` (1080p) / `CRF 28` (4K) com alvo `SSIMULACRA2 81.5`, `--film-grain 8`, `--luminance-qp-bias 15`, detecção automática de **HDR10** (CICP, Mastering Display, MaxCLL/MaxFALL + `--variance-boost-curve 3`), áudio `por -> eng` (Estéreo 128k / 5.1 256k / 7.1 384k) e amostragem `--every 3` no `FFVship`.
+  * `-MediaType 1` (**Anime — Padrão**): base `CRF 25` (1080p) / `CRF 28` (4K) com alvo `SSIMULACRA2 81.5` (corte final `Média >= 80.0` e `5th >= 72.0`), `--film-grain 4`, extração automática de placas `.ass` (`Signs`) e áudio `por -> jpn -> eng` (Estéreo 96k).
+  * `-MediaType 2` (**Filmes / Live-Action**): base `CRF 24` (1080p) / `CRF 28` (4K) com alvo `SSIMULACRA2 81.5`, re-encode habilitado também para **HEVC** (`ValidVideoCodecs = av1, vp9`), `--film-grain 8`, `--luminance-qp-bias 15`, detecção automática de **HDR10** (CICP, Mastering Display, MaxCLL/MaxFALL + `--variance-boost-curve 3`), guarda contra Dolby Vision Perfil 5 sem base HDR10, áudio `por -> eng` (Estéreo 128k / 5.1 256k / 7.1 384k), amostragem `--every 3` no SSIMU2 e auditoria **CVVDP (`standard_hdr_pq`, JOD ≥ 9.5)** para aprovar vídeos HDR PQ.
 * **Regra Enxuta de Legendas PT-BR:**
   * Se houver áudio em **Português**, a faixa de **Placas/Forçada (`Signs`/`Forced`)** vira `Default=yes` + `Forced=yes` (extraindo placas automaticamente do `.ass` completo em animes se necessário).
   * Se o áudio for estrangeiro (ex.: Japonês/Inglês), a **legenda completa em Português** vira `Default=yes`.
@@ -53,6 +53,14 @@ Antes de rodar pela primeira vez, ajuste o bloco `$AppConfig.Paths` no topo do [
 ---
 
 ## 📋 Changelog
+
+### v2.1.0
+* **Anime (`Min5th 72.0`):** Elevado o corte de aprovação do 5º percentil de `68.0` para `72.0` (limiar visual de transparência; reprovados são preservados em `_Encoded.mkv` sem sobrescrever o original).
+* **Auditoria HDR PQ por CVVDP:** Filmes HDR (`smpte2084`) agora são aprovados por **CVVDP JOD ≥ 9.5** via `FFVship` com `--displayModel standard_hdr_pq` e `--gpu-threads 1` (SSIMULACRA2 segue registrado como referência e ainda guia o Auto-Boost).
+* **Filmes HEVC liberados:** No modo `-MediaType 2`, `ValidVideoCodecs` passa a `@("av1", "vp9")`, permitindo re-encodar filmes 4K HDR em HEVC com proteção da regra dos 80%.
+* **Proteção Dolby Vision Perfil 5:** Arquivos DOVI sem camada base HDR10 (`dv_bl_signal_compatibility_id == 0`) são ignorados automaticamente para evitar inversão/distorção de cores.
+* **Métricas CSV (`CvvdpJod`):** Adicionada a coluna `CvvdpJod` em `autoboost_metrics.csv`, com migração automática do cabeçalho em logs antigos antes do `Export-Csv -Append`.
+* **Calibração `--luminance-qp-bias` (Animes):** Teste A/B nas cenas mais escuras de `S01E12` mostrou que `CRF 33 + lqb 20` (`4.75 MB`, média escura `88.26`, 5th `75.07`) não superou `CRF 32 + lqb 10` (`4.86 MB`, média escura `88.43`, 5th `75.33`), mantendo o padrão `10` do encoder Neko.
 
 ### v2.0.1
 * Corrigido o binding de parâmetros no topo de [`Autoboost script.ps1`](./Autoboost%20script.ps1) (removido wrapper `&{...}`), fazendo `-TargetDir`, `-MediaType` e `-FixTracksOnOptimizedVideos` funcionarem via linha de comando.

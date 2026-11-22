@@ -71,6 +71,8 @@ $AppConfig = @{
         RememberRejectedBySize     = $true # Salva em .autoboost_skip.json os arquivos reprovados na regra dos 80% para não reprocessá-los à toa
         VerifyFinalSsimu2          = $true # Executa o FFVship (SSIMULACRA2) final apenas nos arquivos que já passaram na regra de tamanho (<= 80%)
         FixTracksOnOptimizedVideos = $false
+        MinCvvdpHdr                = 9.5   # Aprovação HDR (PQ) pelo CVVDP em JOD (10 = idêntico). shortcut: valor inicial, calibrar após o 1º filme HDR
+        CvvdpDisplayModel          = "standard_hdr_pq"
     }
     MediaPreferences = @{
         # Prioridade de idiomas de áudio (Português principal primeiro, Japonês em seguida, [AD] por último)
@@ -183,7 +185,7 @@ if ($MediaType -eq 1) {
         FinalParams   = "--scm 0 --auto-tiling 1 --film-grain 4 --tune 0 --fast-decode 1 --qp-scale-compress-strength 3"
     })
     $AppConfig.Rules.Add("MinAverage", 80.0)
-    $AppConfig.Rules.Add("Min5th", 68.0)
+    $AppConfig.Rules.Add("Min5th", 72.0) # 72 = limiar de transparência SSIMU2; reprovado vira _Encoded.mkv (original preservado)
     $AppConfig.Rules.Add("FfvshipEvery", 1)
 
 } elseif ($MediaType -eq 2) {
@@ -204,6 +206,7 @@ if ($MediaType -eq 1) {
     $AppConfig.Rules.Add("MinAverage", 80.0)
     $AppConfig.Rules.Add("Min5th", 65.0) # Relaxado para lidar com Motion Blur real
     $AppConfig.Rules.Add("FfvshipEvery", 3)
+    $AppConfig.Rules.ValidVideoCodecs = @("av1", "vp9") # Filmes: HEVC (4K HDR) também é re-encodado; a regra dos 80% protege
 }
 
 # === CORREÇÃO CRÍTICA: SEQUESTRO DE PATH DINÂMICO ===
@@ -437,7 +440,8 @@ function Write-EncodeMetricsLog {
         $SsimuStdDev = $null,
         $FastSsimuAvg = $null,
         $FastSsimuP15 = $null,
-        $FastSsimuMin = $null
+        $FastSsimuMin = $null,
+        $CvvdpJod = $null
     )
 
     if ([string]::IsNullOrWhiteSpace($LogPath)) { return }
@@ -473,12 +477,21 @@ function Write-EncodeMetricsLog {
         SsimuStdDev   = & $Fmt $SsimuStdDev
         ElapsedMin    = & $Fmt $ElapsedMin
         EncoderParams = $EncoderParams
+        CvvdpJod      = & $Fmt $CvvdpJod
     }
 
     try {
         $ParentDir = [System.IO.Path]::GetDirectoryName($LogPath)
         if (-not [string]::IsNullOrWhiteSpace($ParentDir)) {
             [void][System.IO.Directory]::CreateDirectory($ParentDir)
+        }
+        # Migra cabeçalho antigo (sem CvvdpJod) uma vez; Export-Csv -Append exige as mesmas colunas.
+        if ([System.IO.File]::Exists($LogPath)) {
+            $CsvLines = [System.IO.File]::ReadAllLines($LogPath)
+            if ($CsvLines.Count -gt 0 -and $CsvLines[0] -notmatch '"CvvdpJod"') {
+                $CsvLines[0] += ',"CvvdpJod"'
+                [System.IO.File]::WriteAllLines($LogPath, $CsvLines, [System.Text.UTF8Encoding]::new($false))
+            }
         }
         $Row | Export-Csv -Path $LogPath -Append -NoTypeInformation -Encoding utf8
     } catch {
@@ -755,10 +768,15 @@ function Get-VideoColorParams {
         }
     }
 
-    $HasMastering = $false; $HasCll = $false; $HasDoVi = $false; $HasHdr10P = $false
+    $HasMastering = $false; $HasCll = $false; $HasDoVi = $false; $HasHdr10P = $false; $DvNoBase = $false
     foreach ($Sd in $AllSideData) {
         $SdType = [string]$Sd["side_data_type"]
-        if ($SdType -match "(?i)(DOVI|Dolby Vision)") { $HasDoVi = $true }
+        if ($SdType -match "(?i)(DOVI|Dolby Vision)") {
+            $HasDoVi = $true
+            if ($null -ne $Sd["dv_bl_signal_compatibility_id"] -and [int]$Sd["dv_bl_signal_compatibility_id"] -eq 0) {
+                $DvNoBase = $true
+            }
+        }
         elseif ($SdType -match "(?i)(SMPTE2094-40|HDR10\+)") { $HasHdr10P = $true }
         elseif (-not $HasMastering -and $SdType -eq "Mastering display metadata") {
             $Gx = ConvertFrom-FfprobeRational $Sd["green_x"]; $Gy = ConvertFrom-FfprobeRational $Sd["green_y"]
@@ -793,7 +811,7 @@ function Get-VideoColorParams {
     }
 
     $Summary = "$(if ($IsHdrPq) { 'HDR10 PQ' } else { 'SDR' }) ($Prim/$Trans/$Matrix$(if ($HasMastering) { ' + MDCV' })$(if ($HasCll) { ' + CLL' }))"
-    return @{ CliFlags = ($Flags -join " "); IsHdrPq = $IsHdrPq; Summary = $Summary }
+    return @{ CliFlags = ($Flags -join " "); IsHdrPq = $IsHdrPq; Summary = $Summary; DvNoBase = $DvNoBase }
 }
 
 function Get-RuntimeEncoderParams {
@@ -1652,7 +1670,7 @@ function Measure-QualityAndSize {
         Avalia PRIMEIRO a Regra dos 80% de tamanho instantaneamente (0,001s).
         Se reprovar por tamanho, rejeita imediatamente SEM rodar o FFVship (SSIMULACRA2).
     #>
-    param ([hashtable]$Context)
+    param ([hashtable]$Context, [bool]$IsHdr = $false)
 
     # === 1. CÁLCULO INSTANTÂNEO DE TAMANHO (Regra dos 80% ANTES do FFVship) ===
     $OriginalLength = ([System.IO.FileInfo]::new((ConvertTo-LongPath $Context.OriginalFile))).Length
@@ -1702,6 +1720,7 @@ function Measure-QualityAndSize {
     $Ssimu95th    = $null
     $SsimuMin     = $null
     $SsimuStdDev  = $null
+    $CvvdpJod     = $null
 
     $GpuMutex = [System.Threading.Mutex]::new($false, "Local\RTX5060Ti_GPU_Lock")
     $MutexAcquired = $false
@@ -1752,6 +1771,12 @@ function Measure-QualityAndSize {
                 Start-Sleep -Seconds 3
             }
         }
+        # SSIMU2 não entende PQ: em HDR quem aprova é o CVVDP com modelo de tela HDR.
+        if ($IsHdr -and $null -ne $SsimuAverage) {
+            Write-AppLog "HDR PQ: calculando CVVDP ($($AppConfig.Rules.CvvdpDisplayModel))..." "WARN"
+            $CvvdpText = (& $AppConfig.Paths.FfvshipExe --source $Context.OriginalFile --encoded $Context.MkvTemp -m CVVDP --displayModel $AppConfig.Rules.CvvdpDisplayModel --threads 2 --gpu-threads 1) -join "`n"
+            if ($LASTEXITCODE -eq 0 -and $CvvdpText -match 'Video Score\s*:\s*(-?[\d.]+)') { $CvvdpJod = [double]::Parse($Matches[1], [cultureinfo]::InvariantCulture) }
+        }
     } finally {
         try { (Get-Process -Id $PID).PriorityClass = 'Idle' } catch {}
         if ($MutexAcquired) { try { $GpuMutex.ReleaseMutex() } catch {} }
@@ -1776,11 +1801,16 @@ function Measure-QualityAndSize {
         }
     }
 
-    $QualityApproved = ($SsimuAverage -ge $AppConfig.Rules.MinAverage) -and ($Ssimu5th -ge $AppConfig.Rules.Min5th)
+    if ($IsHdr -and $null -eq $CvvdpJod) {
+        Write-AppLog "CVVDP falhou ao auditar '$($Context.BaseName)'. Encode preservado como '_Encoded.mkv'." "ERROR"
+        return @{ Approved = $false; RejectedBySize = $false; AuditFailed = $true; Ratio = $Ratio; OriginalBytes = $OriginalLength; NewBytes = $NewLength }
+    }
+
+    $QualityApproved = if ($IsHdr) { $CvvdpJod -ge $AppConfig.Rules.MinCvvdpHdr } else { ($SsimuAverage -ge $AppConfig.Rules.MinAverage) -and ($Ssimu5th -ge $AppConfig.Rules.Min5th) }
 
     if ($QualityApproved) {
         Write-AppLog "O arquivo reduziu $Savings% e passou no Padrão Premium. Aprovado!" "SUCCESS"
-        Write-AppLog "-> [Métricas] Média: $SsimuAverage | 5th: $Ssimu5th | Min: $SsimuMin" "SUCCESS"
+        Write-AppLog "-> [Métricas] Média: $SsimuAverage | 5th: $Ssimu5th | Min: $SsimuMin$(if ($null -ne $CvvdpJod) { " | CVVDP: $CvvdpJod" })" "SUCCESS"
         return @{
             Approved       = $true
             RejectedBySize = $false
@@ -1793,10 +1823,11 @@ function Measure-QualityAndSize {
             Ssimu95th      = $Ssimu95th
             SsimuMin       = $SsimuMin
             SsimuStdDev    = $SsimuStdDev
+            CvvdpJod       = $CvvdpJod
         }
     } else {
         Write-AppLog "O arquivo falhou nos critérios de Qualidade Visual. Rejeitado!" "ERROR"
-        Write-AppLog "-> [Métricas Obtidas] Média: $SsimuAverage | 5th: $Ssimu5th | Min: $SsimuMin" "WARN"
+        Write-AppLog "-> [Métricas Obtidas] Média: $SsimuAverage | 5th: $Ssimu5th | Min: $SsimuMin$(if ($null -ne $CvvdpJod) { " | CVVDP: $CvvdpJod" })" "WARN"
         return @{
             Approved       = $false
             RejectedBySize = $false
@@ -1809,6 +1840,7 @@ function Measure-QualityAndSize {
             Ssimu95th      = $Ssimu95th
             SsimuMin       = $SsimuMin
             SsimuStdDev    = $SsimuStdDev
+            CvvdpJod       = $CvvdpJod
         }
     }
 }
@@ -1943,6 +1975,11 @@ foreach ($File in $TargetFiles) {
         $ColorProfile   = Get-VideoColorParams -FilePath $Ctx.OriginalFile -VideoStream $VideoStream
         $RuntimeEncoder = Get-RuntimeEncoderParams -VideoStream $VideoStream -ColorProfile $ColorProfile
         Write-AppLog "Perfil de Cor detectado: $($ColorProfile.Summary)" "INFO"
+        if ($ColorProfile.DvNoBase) {
+            Write-AppLog "Dolby Vision sem camada base HDR10 (perfil 5): re-encode geraria cores erradas. Arquivo ignorado." "WARN"
+            Remove-TemporaryAssets -Context $Ctx
+            continue
+        }
 
         $MediaMode        = if ($MediaType -eq 2) { "Filme" } else { "Anime" }
         $Resolution       = "$($VideoStream.width)x$($VideoStream.height)"
@@ -2004,7 +2041,7 @@ foreach ($File in $TargetFiles) {
         Remove-TemporaryAssets -Context $Ctx -KeepMkvTemp $true
 
         # ETAPA E: Auditoria Final (Checa Tamanho em 0,001s ANTES de rodar o FFVship!)
-        $AuditResult = Measure-QualityAndSize -Context $Ctx
+        $AuditResult = Measure-QualityAndSize -Context $Ctx -IsHdr ([bool]$ColorProfile.IsHdrPq)
 
         if ($AuditResult.Approved) {
             $FinalDestPath   = [System.IO.Path]::Combine($Ctx.Directory, "$($Ctx.BaseName).mkv")
@@ -2042,7 +2079,8 @@ foreach ($File in $TargetFiles) {
             -Ratio $AuditResult.Ratio -ElapsedMin $EncodeStopwatch.Elapsed.TotalMinutes `
             -FastSsimuAvg $FastSsimuAvg -FastSsimuP15 $FastSsimuP15 -FastSsimuMin $FastSsimuMin `
             -SsimuAvg $AuditResult.SsimuAvg -SsimuMedian $AuditResult.SsimuMedian -Ssimu5th $AuditResult.Ssimu5th `
-            -Ssimu95th $AuditResult.Ssimu95th -SsimuMin $AuditResult.SsimuMin -SsimuStdDev $AuditResult.SsimuStdDev
+            -Ssimu95th $AuditResult.Ssimu95th -SsimuMin $AuditResult.SsimuMin -SsimuStdDev $AuditResult.SsimuStdDev `
+            -CvvdpJod $AuditResult.CvvdpJod
 
     } catch {
         Write-AppLog "Falha crítica no processamento de $($Ctx.BaseName): $_" "ERROR"
