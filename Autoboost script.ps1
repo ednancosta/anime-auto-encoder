@@ -61,11 +61,11 @@ $AppConfig = @{
             "C:\Windows\Fonts"
         )
         SkipCacheFile   = ".autoboost_skip.json"
-        MetricsLogFile  = "G:\Meu Drive\Drivers e Firmwares\autoboost_metrics.csv"
+        MetricsLogFile  = "G:\Meu Drive\04 - Tecnologia e Backups\Drivers e Firmwares\Scripts Autoboost\autoboost_metrics.csv"
     }
     Rules = @{
         ValidVideoCodecs           = @("av1", "hevc", "vp9")
-        MinFileSizeToEncode        = 800MB # Ignora o re-encode de vídeo em arquivos menores que este tamanho (ex: 800MB)
+        MinFileSizeToEncode        = 700MB # Ignora o re-encode de vídeo em arquivos menores que este tamanho (ex: 800MB)
         MaxTargetSizeRatio         = 0.80  # O arquivo final não pode ultrapassar 80% do original
         EarlyVideoSizeAbort        = $true # Aborta imediatamente após o encode de vídeo (.ivf) se só o vídeo já ultrapassar 80% do arquivo original
         RememberRejectedBySize     = $true # Salva em .autoboost_skip.json os arquivos reprovados na regra dos 80% para não reprocessá-los à toa
@@ -178,8 +178,8 @@ if ($MediaType -eq 1) {
     $AppConfig.Paths.Add("SvtAv1Exe", "C:\Path\SvtAv1EncAppNeko\SvtAv1EncApp.exe")
 
     $AppConfig.Add("Encoder", @{
-        AnimeCrf1080p = 25
-        AnimeCrf4K    = 28
+        AnimeCrf1080p = 29
+        AnimeCrf4K    = 31
         TargetSsimu2  = 81.5
         AutoBoostArgs = @("--target-ssimu2", "81.5", "--ssimu2", "gpu")
         FinalParams   = "--scm 0 --auto-tiling 1 --film-grain 4 --tune 0 --fast-decode 1 --qp-scale-compress-strength 3"
@@ -490,6 +490,11 @@ function Write-EncodeMetricsLog {
             $CsvLines = [System.IO.File]::ReadAllLines($LogPath)
             if ($CsvLines.Count -gt 0 -and $CsvLines[0] -notmatch '"CvvdpJod"') {
                 $CsvLines[0] += ',"CvvdpJod"'
+                for ($i = 1; $i -lt $CsvLines.Count; $i++) {
+                    if (-not [string]::IsNullOrWhiteSpace($CsvLines[$i])) {
+                        $CsvLines[$i] += ',""'
+                    }
+                }
                 [System.IO.File]::WriteAllLines($LogPath, $CsvLines, [System.Text.UTF8Encoding]::new($false))
             }
         }
@@ -566,6 +571,7 @@ function New-SafeExecutionContext {
             TagsXml          = [System.IO.Path]::Combine($SafeJobDir, "tags_temp.xml")
             SubsDir          = [System.IO.Path]::Combine($SafeJobDir, "subs_temp")
             WorkDir          = [System.IO.Path]::Combine($SafeJobDir, "source")
+            SourceIndex      = [System.IO.Path]::Combine($SafeJobDir, "source_audit.ffindex")
         }
     }
 
@@ -584,6 +590,7 @@ function New-SafeExecutionContext {
         TagsXml          = [System.IO.Path]::Combine($RealDir, "tags_temp.xml")
         SubsDir          = [System.IO.Path]::Combine($RealDir, "${RealBaseName}_subs_temp")
         WorkDir          = [System.IO.Path]::Combine($RealDir, $RealBaseName)
+        SourceIndex      = [System.IO.Path]::Combine($RealDir, "${RealBaseName}_audit.ffindex")
     }
 }
 
@@ -608,6 +615,7 @@ function Remove-TemporaryAssets {
 
     if (-not $KeepMkvTemp) {
         try { if ([System.IO.File]::Exists($Context.MkvTemp)) { [System.IO.File]::Delete($Context.MkvTemp) } } catch {}
+        try { if ($Context.SourceIndex -and [System.IO.File]::Exists($Context.SourceIndex)) { [System.IO.File]::Delete($Context.SourceIndex) } } catch {}
         if ($Context.UsingSafeStaging -and -not $KeepResumable) {
             try { if ([System.IO.File]::Exists($Context.OriginalFile))    { [System.IO.File]::Delete($Context.OriginalFile) } } catch {}
             try { if ([System.IO.Directory]::Exists($Context.SafeJobDir)) { [System.IO.Directory]::Delete($Context.SafeJobDir, $true) } } catch {}
@@ -645,6 +653,31 @@ function Get-NormalizedLanguageCode {
 
     if ([string]::IsNullOrWhiteSpace($Raw)) { return "und" }
     return $Raw
+}
+
+function Get-TrackFlags {
+    <#
+    .SYNOPSIS
+        Extrai idioma normalizado, título bruto e flags [AD], CC/SDH e Signs/Forced de uma faixa.
+    #>
+    param ($Stream)
+
+    $RawLang  = if ($Stream.tags -and $Stream.tags.ContainsKey("language")) { [string]$Stream.tags["language"] } else { "" }
+    $RawTitle = if ($Stream.tags -and $Stream.tags.ContainsKey("title"))    { [string]$Stream.tags["title"] }    else { "" }
+    $NormLang = Get-NormalizedLanguageCode -Lang $RawLang -Title $RawTitle
+
+    $VisImpaired  = ($Stream.disposition -and $Stream.disposition["visual_impaired"] -eq 1)
+    $IsForcedDisp = ($Stream.disposition -and $Stream.disposition["forced"] -eq 1)
+    $IsSDHDisp    = ($Stream.disposition -and $Stream.disposition["hearing_impaired"] -eq 1)
+
+    return @{
+        RawLang  = $RawLang
+        RawTitle = $RawTitle
+        NormLang = $NormLang
+        IsAD     = $VisImpaired -or ($RawTitle -match "(?i)(\[ad\]|\bad\b|audio\s*description|audiodescri|descriptive)")
+        IsSigns  = $IsForcedDisp -or ($RawTitle -match "(?i)\b(signs|forced|placas)\b")
+        IsCC     = $IsSDHDisp -or ($RawTitle -match "(?i)(\[cc\]|\bcc\b|sdh|closed\s*caption)")
+    }
 }
 
 # ====================================================================
@@ -822,7 +855,7 @@ function Get-VideoColorParams {
 function Get-RuntimeEncoderParams {
     <#
     .SYNOPSIS
-        Monta AutoBoostArgs e FinalParams finais para cada vídeo (ajustando CRF por resolução em Filmes e injetando flags de cor/HDR10).
+        Monta AutoBoostArgs e FinalParams finais para cada vídeo (ajustando CRF por resolução e injetando flags de cor/HDR10).
     #>
     param (
         [Parameter(Mandatory=$true)]$VideoStream,
@@ -834,21 +867,20 @@ function Get-RuntimeEncoderParams {
     if ($MediaType -eq 1) {
         $BaseCrf = if ($Is4K) { $AppConfig.Encoder.AnimeCrf4K } else { $AppConfig.Encoder.AnimeCrf1080p }
         $FastStr = ("--crf $BaseCrf $ColorFlags").Trim()
-        $AbArgs = @("--fast-params", $FastStr) + @($AppConfig.Encoder.AutoBoostArgs)
-        $FinParams = ("--crf $BaseCrf " + $AppConfig.Encoder.FinalParams + " " + $ColorFlags).Trim()
-        $BaseTarget = "crf=$BaseCrf"
     } else {
         $BaseCrf = if ($Is4K) { $AppConfig.Encoder.MovieCrf4K } else { $AppConfig.Encoder.MovieCrf1080p }
         $FastStr = ("--preset 6 --crf $BaseCrf $ColorFlags").Trim()
-        $AbArgs = @("--fast-params", $FastStr) + @($AppConfig.Encoder.AutoBoostArgs)
-        $FinParams = ("--crf $BaseCrf " + $AppConfig.Encoder.FinalParams + " " + $ColorFlags).Trim()
-        $BaseTarget = "crf=$BaseCrf"
     }
+
+    $AbArgs     = @("--fast-params", $FastStr) + @($AppConfig.Encoder.AutoBoostArgs)
+    $FinParams  = ($AppConfig.Encoder.FinalParams + " " + $ColorFlags).Trim()
+    $BaseTarget = "crf=$BaseCrf"
 
     return @{
         AutoBoostArgs = $AbArgs
         FinalParams   = $FinParams
         BaseTarget    = $BaseTarget
+        EffectiveCrf  = $null
     }
 }
 
@@ -913,12 +945,10 @@ function Get-AudioTrackLayoutPlan {
     $Items = @()
     $RelIdx = 0
     foreach ($Stream in $AudioStreams) {
-        $RawLang  = if ($Stream.tags -and $Stream.tags.ContainsKey("language")) { [string]$Stream.tags["language"] } else { "" }
-        $RawTitle = if ($Stream.tags -and $Stream.tags.ContainsKey("title"))    { [string]$Stream.tags["title"] }    else { "" }
-        $NormLang = Get-NormalizedLanguageCode -Lang $RawLang -Title $RawTitle
-
-        $VisImpaired = ($Stream.disposition -and $Stream.disposition["visual_impaired"] -eq 1)
-        $IsAD = $VisImpaired -or ($RawTitle -match "(?i)(\[ad\]|\bad\b|audio\s*description|audiodescri|descriptive)")
+        $Flags    = Get-TrackFlags $Stream
+        $RawTitle = $Flags.RawTitle
+        $NormLang = $Flags.NormLang
+        $IsAD     = $Flags.IsAD
 
         $LangRank = $AppConfig.MediaPreferences.AudioLanguagePriority.IndexOf($NormLang)
         if ($LangRank -lt 0) { $LangRank = 99 }
@@ -1221,15 +1251,12 @@ function Invoke-SubtitleAndFontProcessing {
         $OutFile = [System.IO.Path]::Combine($Context.SubsDir, ("sub_{0:D2}.{1}" -f $SubRelIdx, $Ext))
         $ExtractArgs += @("-map", "0:s:$SubRelIdx", "-c:s", $OutCodec) + $ExtraFmtArgs + @($OutFile)
 
-        $RawLang  = if ($Stream.tags -and $Stream.tags.ContainsKey("language")) { [string]$Stream.tags["language"] } else { "" }
-        $RawTitle = if ($Stream.tags -and $Stream.tags.ContainsKey("title"))    { [string]$Stream.tags["title"] }    else { "" }
-        $NormLang = Get-NormalizedLanguageCode -Lang $RawLang -Title $RawTitle
-
-        $IsForcedDisp = ($Stream.disposition -and $Stream.disposition["forced"] -eq 1)
-        $IsSDHDisp    = ($Stream.disposition -and $Stream.disposition["hearing_impaired"] -eq 1)
-
-        $IsSigns = $IsForcedDisp -or ($RawTitle -match "(?i)\b(signs|forced|placas)\b")
-        $IsCC    = $IsSDHDisp -or ($RawTitle -match "(?i)(\[cc\]|\bcc\b|sdh|closed\s*caption)")
+        $Flags    = Get-TrackFlags $Stream
+        $RawLang  = $Flags.RawLang
+        $RawTitle = $Flags.RawTitle
+        $NormLang = $Flags.NormLang
+        $IsSigns  = $Flags.IsSigns
+        $IsCC     = $Flags.IsCC
 
         $RawMetaList += @{
             Stream        = $Stream
@@ -1399,8 +1426,7 @@ function Test-NeedsTrackNormalization {
         $DefaultAudios = @($AudioStreams | Where-Object { $_.disposition -and $_.disposition["default"] -eq 1 })
         if ($DefaultAudios.Count -ne 1) { return $true }
 
-        $DefAudioTitle = if ($DefaultAudios[0].tags -and $DefaultAudios[0].tags.ContainsKey("title")) { [string]$DefaultAudios[0].tags["title"] } else { "" }
-        if ($DefAudioTitle -match "(?i)(\[ad\]|\bad\b|audio\s*description|audiodescri)") { return $true }
+        if ((Get-TrackFlags $DefaultAudios[0]).IsAD) { return $true }
 
         $AudioPlan = Get-AudioTrackLayoutPlan -AudioStreams $AudioStreams
         for ($i = 0; $i -lt $AudioStreams.Count; $i++) {
@@ -1410,25 +1436,18 @@ function Test-NeedsTrackNormalization {
     }
 
     $HasPorAudio = ($null -ne ($AudioStreams | Where-Object {
-        $L = if ($_.tags -and $_.tags.ContainsKey("language")) { [string]$_.tags["language"] } else { "" }
-        $T = if ($_.tags -and $_.tags.ContainsKey("title"))    { [string]$_.tags["title"] }    else { "" }
-        $IsAD = ($_.disposition -and $_.disposition["visual_impaired"] -eq 1) -or ($T -match "(?i)(\[ad\]|\bad\b|audio\s*description)")
-        (-not $IsAD) -and ((Get-NormalizedLanguageCode -Lang $L -Title $T) -eq "por")
+        $F = Get-TrackFlags $_
+        (-not $F.IsAD) -and ($F.NormLang -eq "por")
     } | Select-Object -First 1))
 
     if ($SubStreams.Count -gt 0) {
         $NonCcPorSubs = @($SubStreams | Where-Object {
-            $L = if ($_.tags -and $_.tags.ContainsKey("language")) { [string]$_.tags["language"] } else { "" }
-            $T = if ($_.tags -and $_.tags.ContainsKey("title"))    { [string]$_.tags["title"] }    else { "" }
-            $IsCC = ($_.disposition -and $_.disposition["hearing_impaired"] -eq 1) -or ($T -match "(?i)(\[cc\]|\bcc\b|sdh|closed\s*caption)")
-            (-not $IsCC) -and ((Get-NormalizedLanguageCode -Lang $L -Title $T) -eq "por")
+            $F = Get-TrackFlags $_
+            (-not $F.IsCC) -and ($F.NormLang -eq "por")
         })
 
         if ($NonCcPorSubs.Count -ge 2 -and $HasPorAudio) {
-            $SignsSub = $NonCcPorSubs | Where-Object {
-                $T = if ($_.tags -and $_.tags.ContainsKey("title")) { [string]$_.tags["title"] } else { "" }
-                ($_.disposition -and $_.disposition["forced"] -eq 1) -or ($T -match "(?i)\b(signs|forced|placas)\b")
-            } | Select-Object -First 1
+            $SignsSub = $NonCcPorSubs | Where-Object { (Get-TrackFlags $_).IsSigns } | Select-Object -First 1
 
             if ($null -ne $SignsSub -and $AppConfig.MediaPreferences.DefaultSubtitleSigns) {
                 $IsSignsDef = ($SignsSub.disposition -and $SignsSub.disposition["default"] -eq 1)
@@ -1598,7 +1617,9 @@ function Invoke-MediaMuxing {
         $MkvArgs += "--no-audio", "--default-track-flag", "${VideoTrackId}:yes", $Context.OriginalFile
     } else {
         Write-AppLog "Gerando tags de vídeo XML (ENCODER / ENCODER_SETTINGS)..." "INFO"
-        $EncoderSettings = "Auto-Boost: $($RuntimeEncoder.AutoBoostArgs -join ' ') | SVT-AV1: $($RuntimeEncoder.FinalParams)"
+        $CrfTagStr = if ($RuntimeEncoder.EffectiveCrf) { "--crf $($RuntimeEncoder.EffectiveCrf)" } elseif ($RuntimeEncoder.BaseTarget -match "^crf=(.+)$") { "--crf $($Matches[1])" } else { "" }
+        $SvtDisplayParams = ("$CrfTagStr $($RuntimeEncoder.FinalParams)").Trim()
+        $EncoderSettings = "Auto-Boost: $($RuntimeEncoder.AutoBoostArgs -join ' ') | SVT-AV1: $SvtDisplayParams"
         $EscapedEncoder  = [System.Security.SecurityElement]::Escape([string]$EncoderVersion)
         $EscapedSettings = [System.Security.SecurityElement]::Escape([string]$EncoderSettings)
 
@@ -1763,6 +1784,9 @@ function Measure-QualityAndSize {
         (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
         foreach ($GpuThreads in @(2, 1)) {
             $FfvshipArgs = @("--source", $Context.OriginalFile, "--encoded", $Context.MkvTemp, "-m", "SSIMULACRA2", "--threads", "2", "--gpu-threads", [string]$GpuThreads)
+            if ($GpuThreads -eq 2 -and $Context.SourceIndex -and [System.IO.File]::Exists((ConvertTo-LongPath $Context.SourceIndex))) {
+                $FfvshipArgs += @("--source-index", $Context.SourceIndex)
+            }
             if ($AppConfig.Rules.FfvshipEvery -gt 1) {
                 $FfvshipArgs += @("--every", [string]$AppConfig.Rules.FfvshipEvery)
             }
@@ -1792,7 +1816,11 @@ function Measure-QualityAndSize {
         # SSIMU2 não entende PQ: em HDR quem aprova é o CVVDP com modelo de tela HDR.
         if ($IsHdr -and $null -ne $SsimuAverage) {
             Write-AppLog "HDR PQ: calculando CVVDP ($($AppConfig.Rules.CvvdpDisplayModel))..." "WARN"
-            $CvvdpText = (& $AppConfig.Paths.FfvshipExe --source $Context.OriginalFile --encoded $Context.MkvTemp -m CVVDP --displayModel $AppConfig.Rules.CvvdpDisplayModel --threads 2 --gpu-threads 1) -join "`n"
+            $CvvdpArgs = @("--source", $Context.OriginalFile, "--encoded", $Context.MkvTemp, "-m", "CVVDP", "--displayModel", $AppConfig.Rules.CvvdpDisplayModel, "--threads", "2", "--gpu-threads", "1")
+            if ($Context.SourceIndex -and [System.IO.File]::Exists((ConvertTo-LongPath $Context.SourceIndex))) {
+                $CvvdpArgs += @("--source-index", $Context.SourceIndex)
+            }
+            $CvvdpText = (& $AppConfig.Paths.FfvshipExe @CvvdpArgs) -join "`n"
             if ($LASTEXITCODE -eq 0 -and $CvvdpText -match 'Video Score\s*:\s*(-?[\d.]+)') { $CvvdpJod = [double]::Parse($Matches[1], [cultureinfo]::InvariantCulture) }
         }
     } finally {
@@ -1884,12 +1912,15 @@ if (-not $ActiveSvt) {
         if ([System.IO.Directory]::Exists($Wr)) {
             $StaleJobs = @([System.IO.Directory]::EnumerateDirectories($Wr, "job_*"))
             if ($StaleJobs.Count -gt 0) {
+                $RemovedCount = 0
                 foreach ($JobDir in $StaleJobs) {
                     $IsResumable = @([System.IO.Directory]::GetFiles($JobDir, "*_stage.txt", [System.IO.SearchOption]::AllDirectories)).Count -gt 0
                     if ($IsResumable -and [System.IO.Directory]::GetLastWriteTime($JobDir) -gt (Get-Date).AddDays(-14)) { continue } # shortcut: retomáveis expiram em 14 dias
-                    try { [System.IO.Directory]::Delete($JobDir, $true) } catch {}
+                    try { [System.IO.Directory]::Delete($JobDir, $true); $RemovedCount++ } catch {}
                 }
-                Write-AppLog "Limpeza preventiva: $($StaleJobs.Count) pasta(s) órfã(s) removida(s) de '$Wr'." "INFO"
+                if ($RemovedCount -gt 0) {
+                    Write-AppLog "Limpeza preventiva: $RemovedCount pasta(s) órfã(s) removida(s) de '$Wr'." "INFO"
+                }
             }
             try {
                 if (([System.IO.Directory]::GetFileSystemEntries($Wr)).Count -eq 0) {
@@ -2023,6 +2054,7 @@ foreach ($File in $TargetFiles) {
                 if ([double]::TryParse($FastParts[2], [System.Globalization.NumberStyles]::Float, $Inv, [ref]$FastVal)) { $FastSsimuMin = $FastVal }
                 if ($FastParts.Count -ge 4 -and -not [string]::IsNullOrWhiteSpace($FastParts[3])) {
                     $EffectiveCrf = $FastParts[3].Trim()
+                    $RuntimeEncoder.EffectiveCrf = $EffectiveCrf
                 }
             }
         }
@@ -2058,7 +2090,11 @@ foreach ($File in $TargetFiles) {
         # ETAPA C: Empacotamento Final (Padrão CRD)
         Invoke-MediaMuxing -Context $Ctx -EncoderVersion $SvtVersion -MediaData $MediaData -AudioLayoutPlan $AudioLayoutPlan -SubtitlePlan $SubtitlePlan -RuntimeEncoder $RuntimeEncoder -HasAudioTemp $HasAudioTemp
 
-        # ETAPA D: Limpeza prévia de intermediários antes da auditoria visual (poupa disco)
+        # ETAPA D: Preserva source.ffindex para o FFVship e limpa intermediários antes da auditoria visual
+        $WorkFfindex = ConvertTo-LongPath ([System.IO.Path]::Combine($Ctx.WorkDir, "$([System.IO.Path]::GetFileNameWithoutExtension($Ctx.OriginalFile)).ffindex"))
+        if ($Ctx.SourceIndex -and [System.IO.File]::Exists($WorkFfindex)) {
+            try { [System.IO.File]::Move($WorkFfindex, (ConvertTo-LongPath $Ctx.SourceIndex), $true) } catch {}
+        }
         Remove-TemporaryAssets -Context $Ctx -KeepMkvTemp $true
 
         # ETAPA E: Auditoria Final (Checa Tamanho em 0,001s ANTES de rodar o FFVship!)

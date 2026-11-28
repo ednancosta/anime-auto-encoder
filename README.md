@@ -4,11 +4,11 @@ Pipeline automatizado em **PowerShell** para otimização e compressão de **Ani
 
 ---
 
-## ✨ Principais Funcionalidades (v2.2.0)
+## ✨ Principais Funcionalidades (v2.3.0)
 
 * **Alvo de Qualidade Automático (`--target-ssimu2 81.5`):** Funciona no espírito do `ab-av1`, mas avaliando **100% do vídeo** no `fast_pass` sem sorteio de trechos e **sem passes extras** — ajusta o CRF base automaticamente (protegendo média e 15º percentil) antes de distribuir as *zones* cena a cena.
 * **Modos Dedicados (`-MediaType 1` e `-MediaType 2`):**
-  * `-MediaType 1` (**Anime — Padrão**): base `CRF 25` (1080p) / `CRF 28` (4K) com alvo `SSIMULACRA2 81.5` (corte final `Média >= 80.0` e `5th >= 72.0`), `--film-grain 4`, extração automática de placas `.ass` (`Signs`) e áudio `por -> jpn -> eng` (Estéreo 96k).
+  * `-MediaType 1` (**Anime — Padrão**): base `CRF 29` (1080p) / `CRF 31` (4K) com alvo `SSIMULACRA2 81.5` (corte final `Média >= 80.0` e `5th >= 72.0`), `--film-grain 4`, extração automática de placas `.ass` (`Signs`) e áudio `por -> jpn -> eng` (Estéreo 96k).
   * `-MediaType 2` (**Filmes / Live-Action**): base `CRF 24` (1080p) / `CRF 28` (4K) com alvo `SSIMULACRA2 81.5`, re-encode habilitado também para **HEVC** (`ValidVideoCodecs = av1, vp9`), `--film-grain 8`, `--luminance-qp-bias 15`, detecção automática de **HDR10** (CICP, Mastering Display, MaxCLL/MaxFALL + `--variance-boost-curve 3`), guarda contra Dolby Vision Perfil 5 sem base HDR10, áudio `por -> eng` (Estéreo 128k / 5.1 256k / 7.1 384k), auditoria SSIMULACRA2 em **todos os frames** e auditoria **CVVDP (`standard_hdr_pq`, JOD ≥ 9.5)** para aprovar vídeos HDR PQ.
 * **Regra Enxuta de Legendas PT-BR:**
   * Se houver áudio em **Português**, a faixa de **Placas/Forçada (`Signs`/`Forced`)** vira `Default=yes` + `Forced=yes` (extraindo placas automaticamente do `.ass` completo em animes se necessário).
@@ -53,6 +53,11 @@ Antes de rodar pela primeira vez, ajuste o bloco `$AppConfig.Paths` no topo do [
 ---
 
 ## 📋 Changelog
+
+### v2.3.0
+* **CRF inicial calibrado em Animes (`29` 1080p / `31` 4K):** Reduz a distância do *fast pass* até o CRF final (calibrado a partir dos 51 encodes de `autoboost_metrics.csv`), em conjunto com o fork `Auto-Boost-Essential` corrigido (`projected_avg - 0.3`, piso `p15 >= target - 4.5` e `--crf` efetivo repassado ao `final_pass`).
+* **Metadados & `FFVship` otimizados:** A tag `ENCODER_SETTINGS` do MKV agora registra o `--crf` efetivo calculado pelo Auto-Boost, e o índice `source.ffindex` é reaproveitado via `--source-index` pelo `FFVship` para evitar dupla indexação do MKV original.
+* **Limpeza e estabilidade:** Classificação unificada de trilhas `[AD]`/`CC`/`Signs` (`Get-TrackFlags`), correção da contagem na limpeza preventiva de `_autoboost_work` e migração completa de colunas antigas em `autoboost_metrics.csv`.
 
 ### v2.2.0
 * **Retomada segura entre etapas (`--resume`):** Interrupções (`Ctrl+C` ou desligamento) preservam estágios concluídos (`fast_pass`, métricas e cálculo de `zones`), usando pasta `job_<hash>` estável por arquivo (`caminho|tamanho`) e chave `resume_key.txt` (invalida automaticamente se o encoder ou parâmetros mudarem). Qualquer passe interrompido no meio recomeça do frame 0 sem emenda de `.ivf`, evitando vídeo picotado e áudio dessincronizado; trabalhos retomáveis expiram após 14 dias.
